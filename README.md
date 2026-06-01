@@ -1,3 +1,8 @@
+
+
+<img width="800" height="520" alt="mercury" src="https://github.com/user-attachments/assets/a7fcb2cb-d1a6-417c-a031-f39286a92193" />
+
+
 # MercuryShader
 
 A real-time liquid-metal shader for iOS and macOS built with Metal and SwiftUI.
