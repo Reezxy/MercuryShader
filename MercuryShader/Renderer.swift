@@ -54,6 +54,8 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     func draw(in view: MTKView) {
         time += 1.0 / 60.0
+        // Wrap before float precision degrades (~hours of runtime)
+        if time > 1000.0 { time = time.truncatingRemainder(dividingBy: 1000.0) }
 
         guard
             let pipeline  = pipelineState,

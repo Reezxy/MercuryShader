@@ -16,60 +16,39 @@ static float valueNoise(float2 p) {
     float2 i = floor(p);
     float2 f = fract(p);
     float2 u = f * f * (3.0 - 2.0 * f);
-
     float a = hash(i + float2(0.0, 0.0));
     float b = hash(i + float2(1.0, 0.0));
     float c = hash(i + float2(0.0, 1.0));
     float d = hash(i + float2(1.0, 1.0));
-
     return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
 }
 
 // ------------------------------------------------------------
-// fBm — 6 octaves, lacunarity 2.0, gain 0.5
+// fBm — 4 octaves (was 6; sufficient detail, ~33 % cheaper)
 // ------------------------------------------------------------
 
 static float fbm(float2 p) {
     float value     = 0.0;
     float amplitude = 0.5;
     float frequency = 1.0;
-
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < 4; i++) {
         value     += amplitude * valueNoise(p * frequency);
-        frequency *= 2.0;   // lacunarity
-        amplitude *= 0.5;   // gain
+        frequency *= 2.0;
+        amplitude *= 0.5;
     }
     return value;
 }
 
 // ------------------------------------------------------------
-// UV distortion animated by time
+// UV distortion — single-warp (was double; 2 fbm calls vs 4)
 // ------------------------------------------------------------
 
 static float2 distort(float2 uv, float t) {
-    float2 q = float2(
-        fbm(uv + float2(0.0, 0.0) + 0.1 * t),
-        fbm(uv + float2(5.2, 1.3) + 0.1 * t)
-    );
     float2 r = float2(
-        fbm(uv + 4.0 * q + float2(1.7, 9.2) + 0.15 * t),
-        fbm(uv + 4.0 * q + float2(8.3, 2.8) + 0.15 * t)
+        fbm(uv + float2(0.00, 0.00) + 0.10 * t),
+        fbm(uv + float2(5.20, 1.30) + 0.10 * t)
     );
-    return uv + 0.25 * r;
-}
-
-// ------------------------------------------------------------
-// Fake surface normal via finite differences on fBm
-// ------------------------------------------------------------
-
-static float3 surfaceNormal(float2 uv, float t) {
-    const float eps = 0.002;
-    float2 duv = distort(uv, t);
-    float hC  = fbm(duv);
-    float hDx = fbm(distort(uv + float2(eps, 0.0), t));
-    float hDy = fbm(distort(uv + float2(0.0, eps), t));
-    float3 n = normalize(float3(hC - hDx, hC - hDy, 0.015));
-    return n;
+    return uv + 0.35 * r;
 }
 
 // ------------------------------------------------------------
@@ -82,14 +61,12 @@ struct VertexOut {
 };
 
 vertex VertexOut vertexShader(uint vid [[vertex_id]]) {
-    // Two triangles forming a fullscreen quad
     const float2 positions[6] = {
         {-1.0,  1.0}, {-1.0, -1.0}, { 1.0, -1.0},
         {-1.0,  1.0}, { 1.0, -1.0}, { 1.0,  1.0}
     };
     VertexOut out;
     out.position = float4(positions[vid], 0.0, 1.0);
-    // Remap NDC [-1,1] to UV [0,1]; flip Y so top-left is (0,0)
     out.uv = positions[vid] * float2(0.5, -0.5) + 0.5;
     return out;
 }
@@ -99,35 +76,38 @@ vertex VertexOut vertexShader(uint vid [[vertex_id]]) {
 // ------------------------------------------------------------
 
 fragment float4 fragmentShader(
-    VertexOut      in       [[stage_in]],
+    VertexOut        in     [[stage_in]],
     constant Uniforms& u    [[buffer(0)]],
     texture2d<float> envMap [[texture(0)]]
 ) {
     constexpr sampler s(address::repeat, filter::linear);
 
     float2 uv = in.uv;
-    // Correct for aspect ratio so the noise is isotropic
-    float aspect = u.resolution.x / u.resolution.y;
-    uv.x *= aspect;
+    uv.x *= u.resolution.x / u.resolution.y;   // aspect-correct noise
 
-    // 1. Distort UVs
-    float2 dUV = distort(uv, u.time);
+    // 1. Distort UVs — computed ONCE and reused everywhere below.
+    //    Old code recomputed distort() 3 more times inside surfaceNormal;
+    //    finite-differencing dUV directly avoids that entirely.
+    float2 dUV = distort(uv, u.time);           // 2 fbm calls
 
-    // 2. Fake surface normal
-    float3 N = surfaceNormal(uv, u.time);
+    // 2. Surface normal via finite differences directly on distorted coords
+    //    Cost: 3 fbm calls (vs 12+ before)
+    const float eps = 0.004;
+    float hC  = fbm(dUV);
+    float hDx = fbm(dUV + float2(eps, 0.0));
+    float hDy = fbm(dUV + float2(0.0, eps));
+    float3 N  = normalize(float3(hC - hDx, hC - hDy, 0.02));
 
-    // 3. View direction (fixed for a flat 2D surface)
+    // 3. View direction (flat fullscreen surface)
     float3 V = float3(0.0, 0.0, 1.0);
 
-    // 4. Fresnel-Schlick approximation
+    // 4. Fresnel-Schlick
     float fresnel = pow(1.0 - saturate(dot(V, N)), 3.0);
 
-    // 5. Reflection direction
-    float3 R = reflect(-V, N);
-    // Project reflected direction onto UV for environment lookup
-    float2 envUV = R.xy * 0.5 + 0.5;
-    float4 envSample = envMap.sample(s, envUV);
-    float3 envColor = envSample.rgb;
+    // 5. Reflection + environment map
+    float3 R       = reflect(-V, N);
+    float2 envUV   = R.xy * 0.5 + 0.5;
+    float3 envColor = envMap.sample(s, envUV).rgb;
 
     // 6. Specular highlight
     float spec = pow(max(dot(R, V), 0.0), 64.0);
